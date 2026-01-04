@@ -39,7 +39,27 @@ from kumparanian import ds
 # Import your libraries here
 # Example:
 # import torch
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.ensemble import VotingClassifier
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.svm import LinearSVC
+import numpy as np
+import pandas as pd
+import re
+import string
+import time
 
+# Helper function for text standadrization
+def standardization(text):
+    if not isinstance(text, str):
+        return ""
+    text = text.lower()
+    text = text.translate(str.maketrans("", "", string.punctuation))
+    text = re.sub(r"\d+", "", text)
+    text = " ".join(text.split())
+    return text
 
 class Model:
 
@@ -47,7 +67,7 @@ class Model:
         """
         You can add more parameter here to initialize your model
         """
-        pass
+        self.pipeline = None
 
     def train(self):
         """
@@ -58,8 +78,44 @@ class Model:
         # data = read_dataset("file.csv")
         # self.network = torch.RNN ...
         # self.network.train(data)
-
-        raise NotImplementedError  # Delete this line
+        print("Loading dataset...")
+        try:
+            df = pd.read_csv('data.csv')
+        except FileNotFoundError:
+            print("Error: data.csv not found. Please ensure it is in the same directory.")
+            return
+        print("Cleaning and Preprocessing data...")
+        whitespace_mask = df["article_content"].str.strip() == ""
+        df.loc[whitespace_mask, "article_content"] = np.nan
+        df = df.dropna(subset=["article_content"])
+        topic_counts = df.groupby("article_content")["article_topic"].nunique()
+        conflicting_contents = topic_counts[topic_counts > 1].index
+        df = df[~df["article_content"].isin(conflicting_contents)]
+        df = df.drop_duplicates(subset=["article_content"], keep='first')
+        df["word_count"] = df["article_content"].apply(lambda x: len(str(x).split()))
+        df = df[df["word_count"] >= 20].copy()
+        df["standardized_content"] = df["article_content"].apply(standardization)
+        X = df["standardized_content"]
+        y = df["article_topic"]
+        print("Initializing Ensemble Model (LinearSVC + LogisticRegression)...")
+        svc = LinearSVC(class_weight='balanced', random_state=777)
+        calibrated_svc = CalibratedClassifierCV(svc, method='sigmoid', cv=5)
+        lr = LogisticRegression(class_weight='balanced', solver='liblinear', random_state=777)
+        self.pipeline = Pipeline([
+            ("tfidf", TfidfVectorizer(max_features=5000, ngram_range=(1, 2))),
+            ("voting", VotingClassifier(
+                estimators=[
+                    ("svc", calibrated_svc),
+                    ("lr", lr)
+                ],
+                voting='soft'
+            ))
+        ])
+        print("Training model...")
+        start_time = time.time()
+        self.pipeline.fit(X, y)
+        end_time = time.time()
+        print(f"Training finished in {end_time - start_time:.2f} seconds.")
 
     def predict(self, input):
         """
@@ -71,8 +127,11 @@ class Model:
         # output = self.network.forward(processed_input)
         # label = get_label(output)
         # return label
-
-        raise NotImplementedError  # Delete this line
+        if self.pipeline is None:
+            raise Exception("Model has not been trained yet. Call model.train() first.")
+        standardized_input = standardization(input)
+        prediction = self.pipeline.predict([standardized_input])[0]
+        return prediction
 
     def save(self):
         """
